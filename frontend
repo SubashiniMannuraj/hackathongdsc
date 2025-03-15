@@ -54,33 +54,69 @@
 
         // Voice Recognition and Transcription
         document.getElementById("mic-button").addEventListener("click", async () => {
-            const recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
-            recognition.lang = document.getElementById("language-select").value;
+            if (!(window.SpeechRecognition || window.webkitSpeechRecognition)) {
+                displayMessage("bot", "Sorry, your browser does not support speech recognition.");
+                return;
+            }
 
-            recognition.onresult = async (event) => {
-                const transcript = event.results[0][0].transcript;
-                document.getElementById("user-input").value = transcript;
+            try {
+                const recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+                recognition.lang = document.getElementById("language-select").value;
 
-                // Display user message
-                displayMessage("user", transcript);
+                recognition.onresult = async (event) => {
+                    const transcript = event.results[0][0].transcript;
+                    document.getElementById("user-input").value = transcript;
 
-                // Send transcription to backend for processing
-                try {
-                    const response = await fetch(`${BASE_URL}/ask_legal/`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ question: transcript })
-                    });
+                    // Display user message
+                    displayMessage("user", transcript);
 
-                    const result = await response.json();
-                    displayMessage("bot", result.response);
-                } catch (error) {
-                    console.error("Error:", error);
-                    displayMessage("bot", "Sorry, something went wrong.");
-                }
-            };
+                    // Send transcription to backend for processing
+                    try {
+                        const response = await fetch(`${BASE_URL}/ask_legal/`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ question: transcript })
+                        });
 
-            recognition.start();
+                        const result = await response.json();
+                        displayMessage("bot", result.response);
+                    } catch (error) {
+                        console.error("Error:", error);
+                        displayMessage("bot", "Sorry, something went wrong.");
+                    }
+                };
+
+                recognition.onerror = (event) => {
+                    console.error("Speech recognition error:", event.error);
+                    switch (event.error) {
+                        case "not-allowed":
+                        case "permission-denied":
+                            displayMessage("bot", "Please allow microphone access to use this feature.");
+                            break;
+                        case "no-speech":
+                            displayMessage("bot", "No speech detected. Please try again.");
+                            break;
+                        case "audio-capture":
+                            displayMessage("bot", "No microphone found. Please check your microphone.");
+                            break;
+                        default:
+                            displayMessage("bot", "Sorry, there was an error with speech recognition.");
+                    }
+                };
+
+                recognition.onstart = () => {
+                    console.log("Microphone access granted. Listening...");
+                };
+
+                recognition.onend = () => {
+                    console.log("Speech recognition ended.");
+                };
+
+                recognition.start();
+            } catch (error) {
+                console.error("Error initializing speech recognition:", error);
+                displayMessage("bot", "Sorry, there was an error accessing the microphone.");
+            }
         });
 
         // Handle PDF Upload
