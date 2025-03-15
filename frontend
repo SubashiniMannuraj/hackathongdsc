@@ -1,137 +1,151 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Legal Chatbot - Nyaya AI</title>
-    <link rel="stylesheet" href="bot.css" />
-</head>
-<body>
-    <main>
-        <section class="chatbot-container">
-            <div class="chat-header">
-                <select id="language-select">
-                    <option value="en">English</option>
-                    <option value="hi">Hindi</option>
-                    <option value="ta">Tamil</option>
-                    <option value="te">Telugu</option>
-                    <option value="kn">Kannada</option>
-                    <option value="ml">Malayalam</option>
-                    <option value="mr">Marathi</option>
-                    <option value="bn">Bengali</option>
-                    <option value="gu">Gujarati</option>
-                    <option value="pa">Punjabi</option>
-                    <option value="or">Odia</option>
-                    <option value="as">Assamese</option>
-                    <option value="ur">Urdu</option>
-                    <option value="kok">Konkani</option>
-                    <option value="ma">Manipuri</option>
-                    <option value="ne">Nepali</option>
-                    <option value="sd">Sindhi</option>
-                    <option value="ks">Kashmiri</option>
-                    <option value="doi">Dogri</option>
-                    <option value="skt">Sanskrit</option>
-                </select>
-                <h2>Nyaya AI Chatbot</h2>
-            </div>
-            <div class="chat-content">
-                <div class="chat-body" id="chat-body">
-                    <p class="bot-message">Hello! How can I assist you with legal queries today?</p>
-                </div>
-                <div class="chat-footer">
-                    <input type="text" id="user-input" placeholder="Type your legal query..." />
-                    <button id="mic-button">🎤</button>
-                    <label for="pdf-upload" class="pdf-icon">📄</label>
-                    <input type="file" id="pdf-upload" accept="application/pdf" style="display: none;" />
-                    <button onclick="sendMessage()">Send</button>
-                </div>
-            </div>
-        </section>
-    </main>
+from fastapi import FastAPI, UploadFile, File, Query, HTTPException
+import speech_recognition as sr
+from deep_translator import GoogleTranslator
+from gtts import gTTS
+import io
+import os
+import pygame
+import requests
+from neo4j import GraphDatabase
+from pydantic import BaseModel
 
-    <script>
-        const BASE_URL = 'http://localhost:8080'; // Update if using a different port
+# Initialize FastAPI
+app = FastAPI()
 
-        // Voice Recognition and Transcription
-        document.getElementById("mic-button").addEventListener("click", () => {
-            const recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
-            recognition.lang = document.getElementById("language-select").value;
+# Initialize speech recognizer and pygame for audio playback
+r = sr.Recognizer()
+pygame.mixer.init()
 
-            recognition.onresult = async (event) => {
-                const transcript = event.results[0][0].transcript;
-                document.getElementById("user-input").value = transcript;
+# API and database credentials
+gemini_api_key = "AIzaSyB41Ej7H9DccggK5RCzA96ChUrLjvxlExE"
+neo4j_uri = "neo4j+s://691ef1aa.databases.neo4j.io"
+neo4j_user = "neo4j"
+neo4j_password = "ygDVA8lxN2Dn-ZuDeawDjZaivNOUO973-sS9vPD5_D0"
 
-                // Send transcription to backend
-                const response = await fetch(${BASE_URL}/transcribe/, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ text: transcript })
-                });
+# Language code mappings
+LANGUAGES = {
+    "ta": "Tamil", "te": "Telugu", "hi": "Hindi", "ml": "Malayalam",
+    "bn": "Bengali", "gu": "Gujarati", "kn": "Kannada", "mr": "Marathi",
+    "pa": "Punjabi", "ur": "Urdu", "as": "Assamese", "or": "Odia",
+    "kok": "Konkani", "mai": "Maithili", "sat": "Santali", "ne": "Nepali",
+    "sd": "Sindhi", "ks": "Kashmiri", "doi": "Dogri", "mni": "Manipuri",
+    "sa": "Sanskrit", "brx": "Bodo", "tcy": "Tulu", "en": "English"
+}
+LANGUAGE_CODES = {v: k for k, v in LANGUAGES.items()}
 
-                const result = await response.json();
-                displayMessage("bot", result.transcription);
-            };
+class GeminiAPI:
+    """Handles requests to Gemini AI API."""
+    def _init_(self, api_key):
+        self.api_key = api_key
+        self.base_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
-            recognition.start();
-        });
+    def ask(self, prompt):
+        headers = {"Content-Type": "application/json"}
+        data = {"contents": [{"parts": [{"text": prompt}]}]}
+        response = requests.post(f"{self.base_url}?key={self.api_key}", headers=headers, json=data)
+        if response.status_code == 200:
+            return response.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "No response received.")
+        return f"Error: API request failed with status {response.status_code}: {response.text}"
 
-        // Handle PDF Upload
-        document.getElementById("pdf-upload").addEventListener("change", async (event) => {
-            const file = event.target.files[0];
-            if (file && file.type === "application/pdf") {
-                const formData = new FormData();
-                formData.append('file', file);
+class Neo4jConnector:
+    """Manages Neo4j database connections."""
+    def _init_(self, uri, user, password):
+        self.driver = GraphDatabase.driver(uri, auth=(user, password))
 
-                const response = await fetch(${BASE_URL}/transcribe/, {
-                    method: 'POST',
-                    body: formData
-                });
+    def close(self):
+        self.driver.close()
 
-                const result = await response.json();
-                displayMessage("bot", result.transcription);
-            } else {
-                alert("Please upload a valid PDF file.");
-            }
-        });
+    def query(self, query):
+        try:
+            with self.driver.session() as session:
+                result = session.run(query)
+                return [record.data() for record in result] if result else None
+        except Exception as e:
+            return None  # Prevents breaking flow
 
-        // Handle Sending Message
-        async function sendMessage() {
-            const userInput = document.getElementById("user-input").value;
-            const language = document.getElementById("language-select").value;
+class LegalAidAIAssistant:
+    """AI-powered legal assistant using Gemini and Neo4j."""
+    def _init_(self, gemini_api_key, neo4j_uri, neo4j_user, neo4j_password):
+        self.gemini = GeminiAPI(gemini_api_key)
+        self.neo4j = Neo4jConnector(neo4j_uri, neo4j_user, neo4j_password)
 
-            if (!userInput.trim()) return;
+    def generate_answer(self, question):
+        system_prompt = """
+        You are a Legal AI Assistant specializing in Indian law.
+        Start with a brief legal summary and ask if the user wants detailed steps.
+        If no data is found in Neo4j, answer with pre-trained legal knowledge.
+        give this in copy paste format no bold letter words.
+        """
+        cypher_prompt = f"Convert the legal question to a Neo4j Cypher query: {question}"
+        cypher_query = self.gemini.ask(cypher_prompt)
+        knowledge = self.neo4j.query(cypher_query)
+        final_prompt = f"{system_prompt}\nUser: {question}\nNeo4j Data: {knowledge or 'None'}\nAssistant:"
+        return self.gemini.ask(final_prompt)
 
-            // Display user message
-            displayMessage("user", userInput);
+    def close(self):
+        self.neo4j.close()
 
-            try {
-                // Send message to backend for processing
-                const response = await fetch(${BASE_URL}/ask_legal/, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ question: userInput, lang: language })
-                });
+def play_tts_in_chunks(text, lang):
+    """Splits long text into smaller chunks and plays audio."""
+    sentences = text.split('. ')
+    for chunk in sentences:
+        tts = gTTS(text=chunk, lang=lang, slow=False)
+        audio_data = io.BytesIO()
+        tts.write_to_fp(audio_data)
+        audio_data.seek(0)
+        temp_file = "temp_audio.mp3"
+        with open(temp_file, "wb") as f:
+            f.write(audio_data.read())
+        pygame.mixer.music.load(temp_file)
+        pygame.mixer.music.play()
+        while pygame.mixer.music.get_busy():
+            pygame.time.Clock().tick(10)
+        os.remove(temp_file)
 
-                const result = await response.json();
-                displayMessage("bot", result.response);
-            } catch (error) {
-                console.error("Error:", error);
-                displayMessage("bot", "Sorry, something went wrong.");
-            }
+@app.post("/transcribe/")
+async def transcribe_audio(file: UploadFile = File(...)):
+    """Transcribes speech to text."""
+    try:
+        with open("temp.wav", "wb") as buffer:
+            buffer.write(await file.read())
+        with sr.AudioFile("temp.wav") as source:
+            audio = r.record(source)
+        text = r.recognize_google(audio)
+        os.remove("temp.wav")
+        return {"transcription": text}
+    except Exception as e:
+        os.remove("temp.wav")
+        raise HTTPException(status_code=500, detail=str(e))
 
-            // Clear input after sending
-            document.getElementById("user-input").value = "";
-        }
+@app.get("/translate/")
+def translate_text(text: str = Query(...), target_lang: str = Query(...)):
+    """Translates text into the specified language."""
+    try:
+        translated_text = GoogleTranslator(source="auto", target=target_lang).translate(text)
+        return {"translated_text": translated_text}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-        // Display Messages in Chat
-        function displayMessage(sender, message) {
-            const chatBody = document.getElementById("chat-body");
-            const messageElement = document.createElement("p");
-            messageElement.className = sender === "user" ? "user-message" : "bot-message";
-            messageElement.textContent = message;
-            chatBody.appendChild(messageElement);
-            chatBody.scrollTop = chatBody.scrollHeight;
-        }
-    </script>
-</body>
-</html>
+@app.get("/generate_speech/")
+def generate_speech(text: str = Query(...), lang: str = Query(...)):
+    """Converts text to speech and plays audio."""
+    try:
+        play_tts_in_chunks(text, lang)
+        return {"message": "Speech generated and played successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/ask_legal/")
+def ask_legal(question: str = Query(...)):
+    """Handles legal questions using Neo4j and Gemini AI."""
+    try:
+        legal_ai = LegalAidAIAssistant(gemini_api_key, neo4j_uri, neo4j_user, neo4j_password)
+        response = legal_ai.generate_answer(question)
+        legal_ai.close()
+        return {"response": response}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+if _name_ == "_main_":
+    import uvicorn
+    uvicorn.run(app, port=8080)
