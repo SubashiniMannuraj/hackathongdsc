@@ -1,4 +1,6 @@
-from fastapi import FastAPI, UploadFile, File, Query, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Query
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import speech_recognition as sr
 from deep_translator import GoogleTranslator
 from gtts import gTTS
@@ -7,10 +9,18 @@ import os
 import pygame
 import requests
 from neo4j import GraphDatabase
-from pydantic import BaseModel
 
 # Initialize FastAPI
 app = FastAPI()
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins (replace "*" with your frontend URL in production)
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all methods (GET, POST, OPTIONS, etc.)
+    allow_headers=["*"],  # Allow all headers
+)
 
 # Initialize speech recognizer and pygame for audio playback
 r = sr.Recognizer()
@@ -35,7 +45,7 @@ LANGUAGE_CODES = {v: k for k, v in LANGUAGES.items()}
 
 class GeminiAPI:
     """Handles requests to Gemini AI API."""
-    def _init_(self, api_key):
+    def __init__(self, api_key):
         self.api_key = api_key
         self.base_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
@@ -49,7 +59,7 @@ class GeminiAPI:
 
 class Neo4jConnector:
     """Manages Neo4j database connections."""
-    def _init_(self, uri, user, password):
+    def __init__(self, uri, user, password):
         self.driver = GraphDatabase.driver(uri, auth=(user, password))
 
     def close(self):
@@ -65,7 +75,7 @@ class Neo4jConnector:
 
 class LegalAidAIAssistant:
     """AI-powered legal assistant using Gemini and Neo4j."""
-    def _init_(self, gemini_api_key, neo4j_uri, neo4j_user, neo4j_password):
+    def __init__(self, gemini_api_key, neo4j_uri, neo4j_user, neo4j_password):
         self.gemini = GeminiAPI(gemini_api_key)
         self.neo4j = Neo4jConnector(neo4j_uri, neo4j_user, neo4j_password)
 
@@ -85,22 +95,20 @@ class LegalAidAIAssistant:
     def close(self):
         self.neo4j.close()
 
-def play_tts_in_chunks(text, lang):
-    """Splits long text into smaller chunks and plays audio."""
-    sentences = text.split('. ')
-    for chunk in sentences:
-        tts = gTTS(text=chunk, lang=lang, slow=False)
-        audio_data = io.BytesIO()
-        tts.write_to_fp(audio_data)
-        audio_data.seek(0)
-        temp_file = "temp_audio.mp3"
-        with open(temp_file, "wb") as f:
-            f.write(audio_data.read())
-        pygame.mixer.music.load(temp_file)
-        pygame.mixer.music.play()
-        while pygame.mixer.music.get_busy():
-            pygame.time.Clock().tick(10)
-        os.remove(temp_file)
+# Define the request model for /ask_legal/
+class QuestionRequest(BaseModel):
+    question: str
+
+@app.post("/ask_legal/")
+def ask_legal(request: QuestionRequest):
+    """Handles legal questions using Neo4j and Gemini AI."""
+    try:
+        legal_ai = LegalAidAIAssistant(gemini_api_key, neo4j_uri, neo4j_user, neo4j_password)
+        response = legal_ai.generate_answer(request.question)
+        legal_ai.close()
+        return {"response": response}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/transcribe/")
 async def transcribe_audio(file: UploadFile = File(...)):
@@ -135,17 +143,23 @@ def generate_speech(text: str = Query(...), lang: str = Query(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/ask_legal/")
-def ask_legal(question: str = Query(...)):
-    """Handles legal questions using Neo4j and Gemini AI."""
-    try:
-        legal_ai = LegalAidAIAssistant(gemini_api_key, neo4j_uri, neo4j_user, neo4j_password)
-        response = legal_ai.generate_answer(question)
-        legal_ai.close()
-        return {"response": response}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+def play_tts_in_chunks(text, lang):
+    """Splits long text into smaller chunks and plays audio."""
+    sentences = text.split('. ')
+    for chunk in sentences:
+        tts = gTTS(text=chunk, lang=lang, slow=False)
+        audio_data = io.BytesIO()
+        tts.write_to_fp(audio_data)
+        audio_data.seek(0)
+        temp_file = "temp_audio.mp3"
+        with open(temp_file, "wb") as f:
+            f.write(audio_data.read())
+        pygame.mixer.music.load(temp_file)
+        pygame.mixer.music.play()
+        while pygame.mixer.music.get_busy():
+            pygame.time.Clock().tick(10)
+        os.remove(temp_file)
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, port=8080)
