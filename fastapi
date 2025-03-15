@@ -1,6 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Query, HTTPException, Form
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 import speech_recognition as sr
 from deep_translator import GoogleTranslator
 from gtts import gTTS
@@ -9,30 +7,34 @@ import os
 import pygame
 import requests
 from neo4j import GraphDatabase
+from pydantic import BaseModel
 
 # Initialize FastAPI
 app = FastAPI()
 
-# Enable CORS for frontend connection
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Adjust allowed origins for security in production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Initialize recognizer and pygame for TTS
+# Initialize speech recognizer and pygame for audio playback
 r = sr.Recognizer()
 pygame.mixer.init()
 
-# API and Database credentials
-GEMINI_API_KEY = "YOUR_GEMINI_API_KEY"
-NEO4J_URI = "YOUR_NEO4J_URI"
-NEO4J_USER = "YOUR_NEO4J_USER"
-NEO4J_PASSWORD = "YOUR_NEO4J_PASSWORD"
+# API and database credentials
+gemini_api_key = "AIzaSyB41Ej7H9DccggK5RCzA96ChUrLjvxlExE"
+neo4j_uri = "neo4j+s://691ef1aa.databases.neo4j.io"
+neo4j_user = "neo4j"
+neo4j_password = "ygDVA8lxN2Dn-ZuDeawDjZaivNOUO973-sS9vPD5_D0"
+
+# Language code mappings
+LANGUAGES = {
+    "ta": "Tamil", "te": "Telugu", "hi": "Hindi", "ml": "Malayalam",
+    "bn": "Bengali", "gu": "Gujarati", "kn": "Kannada", "mr": "Marathi",
+    "pa": "Punjabi", "ur": "Urdu", "as": "Assamese", "or": "Odia",
+    "kok": "Konkani", "mai": "Maithili", "sat": "Santali", "ne": "Nepali",
+    "sd": "Sindhi", "ks": "Kashmiri", "doi": "Dogri", "mni": "Manipuri",
+    "sa": "Sanskrit", "brx": "Bodo", "tcy": "Tulu", "en": "English"
+}
+LANGUAGE_CODES = {v: k for k, v in LANGUAGES.items()}
 
 class GeminiAPI:
+    """Handles requests to Gemini AI API."""
     def _init_(self, api_key):
         self.api_key = api_key
         self.base_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
@@ -43,9 +45,10 @@ class GeminiAPI:
         response = requests.post(f"{self.base_url}?key={self.api_key}", headers=headers, json=data)
         if response.status_code == 200:
             return response.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "No response received.")
-        return f"Error: {response.status_code} - {response.text}"
+        return f"Error: API request failed with status {response.status_code}: {response.text}"
 
 class Neo4jConnector:
+    """Manages Neo4j database connections."""
     def _init_(self, uri, user, password):
         self.driver = GraphDatabase.driver(uri, auth=(user, password))
 
@@ -58,9 +61,10 @@ class Neo4jConnector:
                 result = session.run(query)
                 return [record.data() for record in result] if result else None
         except Exception as e:
-            return None
+            return None  # Prevents breaking flow
 
 class LegalAidAIAssistant:
+    """AI-powered legal assistant using Gemini and Neo4j."""
     def _init_(self, gemini_api_key, neo4j_uri, neo4j_user, neo4j_password):
         self.gemini = GeminiAPI(gemini_api_key)
         self.neo4j = Neo4jConnector(neo4j_uri, neo4j_user, neo4j_password)
@@ -68,8 +72,9 @@ class LegalAidAIAssistant:
     def generate_answer(self, question):
         system_prompt = """
         You are a Legal AI Assistant specializing in Indian law.
-        Provide a brief legal summary and ask if the user wants detailed steps.
+        Start with a brief legal summary and ask if the user wants detailed steps.
         If no data is found in Neo4j, answer with pre-trained legal knowledge.
+        give this in copy paste format no bold letter words.
         """
         cypher_prompt = f"Convert the legal question to a Neo4j Cypher query: {question}"
         cypher_query = self.gemini.ask(cypher_prompt)
@@ -80,18 +85,26 @@ class LegalAidAIAssistant:
     def close(self):
         self.neo4j.close()
 
-def play_tts(text, lang):
-    tts = gTTS(text=text, lang=lang, slow=False)
-    tts.save("temp.mp3")
-    pygame.mixer.music.load("temp.mp3")
-    pygame.mixer.music.play()
-    while pygame.mixer.music.get_busy():
-        pygame.time.Clock().tick(10)
-    os.remove("temp.mp3")
+def play_tts_in_chunks(text, lang):
+    """Splits long text into smaller chunks and plays audio."""
+    sentences = text.split('. ')
+    for chunk in sentences:
+        tts = gTTS(text=chunk, lang=lang, slow=False)
+        audio_data = io.BytesIO()
+        tts.write_to_fp(audio_data)
+        audio_data.seek(0)
+        temp_file = "temp_audio.mp3"
+        with open(temp_file, "wb") as f:
+            f.write(audio_data.read())
+        pygame.mixer.music.load(temp_file)
+        pygame.mixer.music.play()
+        while pygame.mixer.music.get_busy():
+            pygame.time.Clock().tick(10)
+        os.remove(temp_file)
 
-# Endpoint for transcribing audio
 @app.post("/transcribe/")
 async def transcribe_audio(file: UploadFile = File(...)):
+    """Transcribes speech to text."""
     try:
         with open("temp.wav", "wb") as buffer:
             buffer.write(await file.read())
@@ -101,50 +114,38 @@ async def transcribe_audio(file: UploadFile = File(...)):
         os.remove("temp.wav")
         return {"transcription": text}
     except Exception as e:
+        os.remove("temp.wav")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Endpoint for translating text
 @app.get("/translate/")
 def translate_text(text: str = Query(...), target_lang: str = Query(...)):
+    """Translates text into the specified language."""
     try:
         translated_text = GoogleTranslator(source="auto", target=target_lang).translate(text)
         return {"translated_text": translated_text}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# Endpoint for generating speech
 @app.get("/generate_speech/")
 def generate_speech(text: str = Query(...), lang: str = Query(...)):
+    """Converts text to speech and plays audio."""
     try:
-        play_tts(text, lang)
-        return {"message": "Speech played successfully"}
+        play_tts_in_chunks(text, lang)
+        return {"message": "Speech generated and played successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# Endpoint for handling legal questions
 @app.post("/ask_legal/")
-def ask_legal(question: str = Form(...)):
+def ask_legal(question: str = Query(...)):
+    """Handles legal questions using Neo4j and Gemini AI."""
     try:
-        legal_ai = LegalAidAIAssistant(GEMINI_API_KEY, NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)
+        legal_ai = LegalAidAIAssistant(gemini_api_key, neo4j_uri, neo4j_user, neo4j_password)
         response = legal_ai.generate_answer(question)
         legal_ai.close()
         return {"response": response}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# Endpoint for uploading PDF
-@app.post("/upload_pdf/")
-async def upload_pdf(file: UploadFile = File(...)):
-    try:
-        content = await file.read()
-        file_path = f"uploads/{file.filename}"
-        with open(file_path, "wb") as f:
-            f.write(content)
-        # PDF processing logic here
-        return {"message": "PDF uploaded successfully"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
 if _name_ == "_main_":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    uvicorn.run(app, port=8080)
